@@ -1,0 +1,15 @@
+{
+    "version": 1,
+    "name": "后台IPC应用测试",
+    "uuid": "a6e3e6c7-4d89-4a0a-9cc1-8c4cf6a9b7e4",
+    "description": "后台IPC应用测试，演示所有IPC请求。",
+    "executable": {
+        "file": "ipc_client_demo"
+    },
+    "type": "bg",
+    "screens": [
+        "360x640",
+        "480x854",
+        "720x1280"
+    ]
+}

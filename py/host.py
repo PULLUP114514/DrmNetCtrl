@@ -1,27 +1,39 @@
 import socket
+import struct
 
 SERVER_IP = "192.168.137.2"
 SERVER_PORT = 1572
+BUF_SIZE = 1024  # 最大包长度
 
-# 创建 TCP socket
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    try:
-        s.connect((SERVER_IP, SERVER_PORT))
-        print("Connected to {}:{}".format(SERVER_IP, SERVER_PORT))
+    s.connect((SERVER_IP, SERVER_PORT))
+    print("Connected to {}:{}".format(SERVER_IP, SERVER_PORT))
 
-        while True:
-            # 从控制台读取输入
-            message = input("Input message to send: ")
-            if message.lower() in ("exit", "quit"):
-                break
+    while True:
+        try:
+            # 输入操作码
+            op_code = int(input("Enter Operation Code (0-255): "))
+            if op_code < 0 or op_code > 255:
+                print("Invalid op code")
+                continue
+
+            # 输入操作数据（整数）
+            op_data = input("Enter Operation Data (integer): ")
+            if op_data == "":
+                continue
+            op_int = int(op_data)
+
+            # 打包：Operation Code (1 byte) + Operation Size (2 bytes) + Operation Data (4 bytes)
+            op_size = 4  # int32 固定 4 字节
+            packet = struct.pack("<B H I", op_code, op_size, op_int)  # little-endian
+            if len(packet) > BUF_SIZE:
+                print("Packet too large, skip")
+                continue
 
             # 发送
-            s.sendall(message.encode())
-            print("Sent: {}".format(message))
+            s.sendall(packet)
+            print("Sent packet: Operation Code={}, Data={}".format(op_code, op_int))
 
-            # 可选择接收服务器响应
-            data = s.recv(1024)
-            print("Received:", data.decode())
-
-    except Exception as e:
-        print("Error:", e)
+        except Exception as e:
+            print("Error:", e)
+            break

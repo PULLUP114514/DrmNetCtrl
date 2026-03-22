@@ -3,12 +3,21 @@
  *
  *
  * 包定义 (不超过BUF_SIZE) ：
- *  +------------------+-------------------+------------------------+-------------------------+------------------------+-------------------------+
- *  |  Operation Code  |  Operation Count  |  Operation 1 $Length   |      Operation 1        |  Operation n $Length   |      Operation n        |
- *  |      uInt8       |      uint 8       |       uint 16          |  unsigned Char $Length  |       uint 16          |  unsigned Char $Length  |
- *  +------------------+-------------------+------------------------+-------------------------+------------------------+-------------------------+
- *
+ *   +------------------+-------------------+--------------------+
+ *   |  Operation Code  |  Operation size   |   Operation Data   |
+ *   |      uint8       |      uint 16      |    unsigned char   |
+ *   +------------------+-------------------+--------------------+
+ *  Operation Code 见枚举
  */
+
+// 定义一个枚举类型
+typedef enum
+{
+    CONTOL_BRIGHTNESS = 1,
+    STATUS_RUNNING,
+    STATUS_ERROR,
+    STATUS_DONE
+} OPERATION_CODE_ENUM;
 
 #include <limits.h>
 #include <stdbool.h>
@@ -69,7 +78,11 @@ void notice_with_warning(ipc_client_t *client, const char *title, const char *de
 
 int InitTcpServer(int port);
 
-void MessageProcesser(char *message);
+void MessageProcesser(char *message, ipc_client_t *ipcClient);
+
+void SetBrightness(int brightness, ipc_client_t *ipcClient);
+
+int GetInt(char *data, int offset, uint32_t size);
 
 int main(int argc, char *argv[])
 {
@@ -125,8 +138,7 @@ int main(int argc, char *argv[])
                 break;
 
             buffer[n] = '\0';
-            log_info("Recv: %s\n", buffer);
-
+            MessageProcesser(buffer, &ipcClient);
             write(client_fd, buffer, n); // echo
         }
 
@@ -182,8 +194,65 @@ int InitTcpServer(int port)
     return server_fd;
 }
 
-void MessageProcesser(char *message)
+void MessageProcesser(char *message, ipc_client_t *ipcClient)
 {
+    int size = 5;
 
+    printf("Hex: ");
+    for (int i = 0; i < size; i++)
+    {
+        printf("%02X ", (unsigned char)message[i]);
+    }
+    printf("\n");
+
+    int tempInt = 0;
+    uint8_t packageControlID = 0;
+    memcpy(&packageControlID, message, sizeof(uint8_t));
+    log_info("get Opreation Code %d", packageControlID);
+    switch (packageControlID)
+    {
+    case CONTOL_BRIGHTNESS:
+        memcpy(&tempInt, message + sizeof(uint8_t) * 3, sizeof(int));
+        SetBrightness(tempInt, ipcClient);
+        break;
+
+    default:
+        return;
+    }
+    return;
+}
+
+int GetInt(char *data, int offset, uint32_t size)
+{
+    char *endptr;
+    unsigned char temp[size + 1];
+    memcpy(temp, data + offset, size);
+    int intData = strtol(temp, &endptr, 10);
+    if (errno == ERANGE || endptr == temp || *endptr != '\0')
+    {
+        log_error("NOT A NUMBER! What the hell are you doing?\n");
+        return -1;
+    }
+    return intData;
+}
+
+void SetBrightness(int brightness, ipc_client_t *ipcClient)
+{
+    ipc_settings_data_t settings = {0};
+    if (ipc_client_settings_get(ipcClient, &settings) == 0)
+    {
+        print_settings(&settings);
+        log_info("brightness set to : %d", brightness);
+        settings.brightness = brightness;
+        if (ipc_client_settings_set(ipcClient, &settings) < 0)
+        {
+            log_error("ipc_client_settings_set failed");
+        }
+        usleep(1 * 1000 * 1000);
+    }
+    else
+    {
+        log_error("ipc_client_settings_get failed");
+    }
     return;
 }

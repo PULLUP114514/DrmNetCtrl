@@ -18,6 +18,7 @@ typedef enum
 
 } OPERATION_CODE_ENUM;
 
+#include <signal.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -59,7 +60,7 @@ int main(int argc, char *argv[])
 {
 
     // TODO：Progress Mutex
-    CheckMutex();
+    int initMutexStatus = CheckMutex();
     // init TCP Server
     int sockFD = InitTcpServer(PORT);
     if (sockFD == -1)
@@ -74,6 +75,24 @@ int main(int argc, char *argv[])
     char buffer[BUF_SIZE];
     bool reinitIPC = true;
     ipc_client_t ipcClient = {.fd = -1};
+    if (InitIPC(&ipcClient) != 0)
+    {
+        log_error("Init IPC Failed");
+    }
+    // 使用-2 不显示消息 防止多次初始化IPC多次提示
+    switch (initMutexStatus)
+    {
+    case 0:
+        initMutexStatus = -2;
+        notice_with_warning(&ipcClient, "已启动IPC", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
+        break;
+    case 1:
+        initMutexStatus = -2;
+        notice_with_warning(&ipcClient, "已重新启动IPC", "已击杀之前的IPC进程\n仅建议在无应答时再次运行以重启");
+        break;
+    default:
+        break;
+    }
     // 主TCP循环
     while (1)
     {
@@ -107,7 +126,6 @@ int main(int argc, char *argv[])
                     continue;
                 }
                 reinitIPC = false;
-                notice_with_warning(&ipcClient, "已启动IPC", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
             }
             n = read(client_fd, buffer, BUF_SIZE - 1);
             if (n <= 0)
@@ -250,7 +268,7 @@ int SetBrightness(int brightness, ipc_client_t *ipcClient)
     return 0;
 }
 
-/// @brief 返回-1
+/// @brief 检测是否有旧进程存在
 /// @return
 int CheckMutex()
 {
@@ -293,6 +311,39 @@ int CheckMutex()
         }
     }
 
+    int returnCode = 0;
+    // 多个
+    if (count > 1)
+    {
+        pid_t mypid = getpid();
+        for (int i = 0; i < count; i++)
+        {
+            if (mypid == pidList[i])
+            {
+                continue;
+            }
+            if (kill(pidList[i], SIGINT) == 0)
+            {
+                log_info("Old ipc process terminated\n");
+
+                // 不覆盖失败
+                if (returnCode != -1)
+                {
+                    returnCode = 1;
+                }
+            }
+            else
+            {
+                log_error("Terminate old ipc process FAILED\n");
+                returnCode = -1;
+            }
+        }
+    }
+    // 就tm一个
+    else
+    {
+        returnCode = 0;
+    }
     closedir(dir);
-    return -1;
+    return returnCode;
 }

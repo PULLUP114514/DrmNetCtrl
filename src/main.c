@@ -13,10 +13,9 @@
 // 定义一个枚举类型
 typedef enum
 {
-    CONTOL_BRIGHTNESS = 1,
-    STATUS_RUNNING,
-    STATUS_ERROR,
-    STATUS_DONE
+    CONTOL_BRIGHTNESS = 1, // Operation Data 为一个int 代表目标屏幕亮度
+    CONTOL_EXIT,           // 退出Drm_App
+
 } OPERATION_CODE_ENUM;
 
 #include <limits.h>
@@ -32,41 +31,14 @@ typedef enum
 #include "icons.h"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdio.h>
+#include <dirent.h>
+#include <ctype.h>
 
 #define PATH_MAX 4096
 #define BUF_SIZE 1024
 #define BACKLOG 5
 #define PORT 1572
-
-static int build_asset_path(char *out, size_t out_len, const char *filename)
-{
-    char cwd[PATH_MAX];
-    if (!getcwd(cwd, sizeof(cwd)))
-    {
-        log_error("getcwd failed");
-        return -1;
-    }
-    int written = snprintf(out, out_len, "%s/assets/%s", cwd, filename);
-    if (written < 0 || (size_t)written >= out_len)
-    {
-        log_error("asset path too long: %s", filename);
-        return -1;
-    }
-    return 0;
-}
-
-static void print_settings(const ipc_settings_data_t *settings)
-{
-    log_info(
-        "settings: brightness=%d interval=%d mode=%d usb=%d ctrl_lowbat=%u ctrl_no_intro=%u ctrl_no_overlay=%u",
-        settings->brightness,
-        settings->switch_interval,
-        settings->switch_mode,
-        settings->usb_mode,
-        settings->ctrl_word.lowbat_trip,
-        settings->ctrl_word.no_intro_block,
-        settings->ctrl_word.no_overlay_block);
-}
 
 void notice_with_warning(ipc_client_t *client, const char *title, const char *desc)
 {
@@ -77,28 +49,17 @@ void notice_with_warning(ipc_client_t *client, const char *title, const char *de
 }
 
 int InitTcpServer(int port);
-
-void MessageProcesser(char *message, ipc_client_t *ipcClient);
-
-void SetBrightness(int brightness, ipc_client_t *ipcClient);
-
+int MessageProcesser(char *message, ipc_client_t *ipcClient);
+int SetBrightness(int brightness, ipc_client_t *ipcClient);
 int GetInt(char *data, int offset, uint32_t size);
+int InitIPC(ipc_client_t *ipcClient);
+int CheckMutex();
 
 int main(int argc, char *argv[])
 {
 
     // TODO：Progress Mutex
-
-    // init IPC
-    ipc_client_t ipcClient = {.fd = -1};
-    if (ipc_client_init(&ipcClient) < 0)
-    {
-        log_error("ipc_client_init failed");
-        return 1;
-    }
-    int rc = 0;
-    notice_with_warning(&ipcClient, "已启动IPC", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
-
+    CheckMutex();
     // init TCP Server
     int sockFD = InitTcpServer(PORT);
     if (sockFD == -1)
@@ -108,16 +69,18 @@ int main(int argc, char *argv[])
     }
     log_info("Server listening on %d...\n", PORT);
 
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
+    struct sockaddr_in clientAddress;
+    socklen_t clientLen = sizeof(clientAddress);
     char buffer[BUF_SIZE];
-
+    bool reinitIPC = true;
+    ipc_client_t ipcClient = {.fd = -1};
     // 主TCP循环
     while (1)
     {
+        // init IPC
         int client_fd = accept(sockFD,
-                               (struct sockaddr *)&client_addr,
-                               &client_len);
+                               (struct sockaddr *)&clientAddress,
+                               &clientLen);
         if (client_fd < 0)
         {
             perror("accept");
@@ -125,25 +88,53 @@ int main(int argc, char *argv[])
         }
 
         log_info("Client: %s:%d\n",
-                 inet_ntoa(client_addr.sin_addr),
-                 ntohs(client_addr.sin_port));
+                 inet_ntoa(clientAddress.sin_addr),
+                 ntohs(clientAddress.sin_port));
 
-        notice_with_warning(&ipcClient,
-                            "受到连接",
-                            inet_ntoa(client_addr.sin_addr));
+        // notice_with_warning(&ipcClient,
+        //                     "受到连接",
+        //                     inet_ntoa(clientAddress.sin_addr));
         while (1)
         {
-            int n = read(client_fd, buffer, BUF_SIZE - 1);
+            int n = 0;
+            if (reinitIPC)
+            {
+                ipcClient.fd = -1;
+                if (InitIPC(&ipcClient) != 0)
+                {
+                    log_error("Init IPC Failed");
+                    usleep(3 * 1000 * 1000);
+                    continue;
+                }
+                reinitIPC = false;
+                notice_with_warning(&ipcClient, "已启动IPC", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
+            }
+            n = read(client_fd, buffer, BUF_SIZE - 1);
             if (n <= 0)
                 break;
 
             buffer[n] = '\0';
-            MessageProcesser(buffer, &ipcClient);
-            write(client_fd, buffer, n); // echo
+            int success = MessageProcesser(buffer, &ipcClient);
+            if (success != 0)
+            {
+                reinitIPC = true;
+                continue;
+            }
         }
 
         close(client_fd);
         log_info("Client disconnected\n");
+    }
+    return 0;
+}
+
+int InitIPC(ipc_client_t *ipcClient)
+{
+    // init IPC
+    if (ipc_client_init(ipcClient) < 0)
+    {
+        log_error("ipc_client_init failed");
+        return 1;
     }
     return 0;
 }
@@ -194,17 +185,8 @@ int InitTcpServer(int port)
     return server_fd;
 }
 
-void MessageProcesser(char *message, ipc_client_t *ipcClient)
+int MessageProcesser(char *message, ipc_client_t *ipcClient)
 {
-    int size = 5;
-
-    printf("Hex: ");
-    for (int i = 0; i < size; i++)
-    {
-        printf("%02X ", (unsigned char)message[i]);
-    }
-    printf("\n");
-
     int tempInt = 0;
     uint8_t packageControlID = 0;
     memcpy(&packageControlID, message, sizeof(uint8_t));
@@ -213,15 +195,25 @@ void MessageProcesser(char *message, ipc_client_t *ipcClient)
     {
     case CONTOL_BRIGHTNESS:
         memcpy(&tempInt, message + sizeof(uint8_t) * 3, sizeof(int));
-        SetBrightness(tempInt, ipcClient);
-        break;
-
+        return SetBrightness(tempInt, ipcClient);
+    case CONTOL_EXIT:
+        if (ipc_client_app_exit(ipcClient, EXITCODE_SRGN_CONFIG) < 0)
+        {
+            log_error("ipc_client_app_exit failed");
+            return 1;
+        }
+        return 0;
     default:
-        return;
+        return -1;
     }
-    return;
+    return 0;
 }
 
+/// @brief 转换为int 失败返回 -114514
+/// @param data
+/// @param offset
+/// @param size
+/// @return
 int GetInt(char *data, int offset, uint32_t size)
 {
     char *endptr;
@@ -231,28 +223,76 @@ int GetInt(char *data, int offset, uint32_t size)
     if (errno == ERANGE || endptr == temp || *endptr != '\0')
     {
         log_error("NOT A NUMBER! What the hell are you doing?\n");
-        return -1;
+        return -114514;
     }
     return intData;
 }
 
-void SetBrightness(int brightness, ipc_client_t *ipcClient)
+int SetBrightness(int brightness, ipc_client_t *ipcClient)
 {
     ipc_settings_data_t settings = {0};
     if (ipc_client_settings_get(ipcClient, &settings) == 0)
     {
-        print_settings(&settings);
         log_info("brightness set to : %d", brightness);
         settings.brightness = brightness;
         if (ipc_client_settings_set(ipcClient, &settings) < 0)
         {
             log_error("ipc_client_settings_set failed");
+            return 1;
         }
         usleep(1 * 1000 * 1000);
     }
     else
     {
         log_error("ipc_client_settings_get failed");
+        return 1;
     }
-    return;
+    return 0;
+}
+
+/// @brief 返回-1
+/// @return
+int CheckMutex()
+{
+
+    DIR *dir = opendir("/proc");
+    struct dirent *entry;
+    int pidList[128] = {0};
+    int count = 0;
+    int temp = 0;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        // 判断是否是数字（PID）
+        if (isdigit(entry->d_name[0]))
+        {
+            char path[256];
+            snprintf(path, sizeof(path), "/proc/%s/comm", entry->d_name);
+
+            FILE *fp = fopen(path, "r");
+            if (fp)
+            {
+                char name[256];
+                fgets(name, sizeof(name), fp);
+
+                // 去掉换行
+                name[strcspn(name, "\n")] = 0;
+
+                if (strcmp(name, "IpcController") == 0)
+                {
+                    char *endptr;
+                    long pid = strtol(entry->d_name, &endptr, 10);
+                    if (*endptr == '\0')
+                    {
+                        log_info("Found PID: %ld\n", pid);
+                        pidList[count] = pid;
+                        count++;
+                    }
+                }
+                fclose(fp);
+            }
+        }
+    }
+
+    closedir(dir);
+    return -1;
 }

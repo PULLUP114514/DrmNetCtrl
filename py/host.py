@@ -25,7 +25,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
 
             # 打包：Operation Code (1 byte) + Operation Size (2 bytes) + Operation Data (4 bytes)
             op_size = 4  # int32 固定 4 字节
-            packet = struct.pack("<B H I", op_code, op_size, op_int)  # little-endian
+            packet = struct.pack("<B H i", op_code, op_size, op_int)  # little-endian
             if len(packet) > BUF_SIZE:
                 print("Packet too large, skip")
                 continue

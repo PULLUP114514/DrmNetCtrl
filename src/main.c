@@ -32,10 +32,11 @@ typedef enum
 #include "icons.h"
 #include <arpa/inet.h>
 #include <errno.h>
-#include <stdio.h>
 #include <dirent.h>
 #include <ctype.h>
+#include <cJSON.h>
 
+#define JSON_PATH "./appconfig.json"
 #define PATH_MAX 4096
 #define BUF_SIZE 1024
 #define BACKLOG 5
@@ -55,15 +56,45 @@ int SetBrightness(int brightness, ipc_client_t *ipcClient);
 int GetInt(char *data, int offset, uint32_t size);
 int InitIPC(ipc_client_t *ipcClient);
 int CheckMutex();
+int WriteConfig(const char *old_str, const char *new_str);
+void cleanup();
+
+ipc_client_t ipcClient = {.fd = -1};
+volatile sig_atomic_t g_running = 1;
+int g_server_fd = -1;
+int g_client_fd = -1;
+
+/// @brief 退出回调
+/// @param sig
+void handle_sig(int sig)
+{
+    log_info("Get Signal %d\n", sig);
+    log_info("cleaning");
+    g_running = 0;
+    // 打断 accept()
+    if (g_server_fd >= 0)
+    {
+        close(g_server_fd);
+    }
+    if (g_client_fd >= 0)
+    {
+        close(g_client_fd);
+    }
+    cleanup();
+    exit(0);
+}
 
 int main(int argc, char *argv[])
 {
+    // 捕获退出信号
+    signal(SIGINT, handle_sig);  // Ctrl+C
+    signal(SIGTERM, handle_sig); // kill
 
     // TODO：Progress Mutex
     int initMutexStatus = CheckMutex();
     // init TCP Server
-    int sockFD = InitTcpServer(PORT);
-    if (sockFD == -1)
+    g_server_fd = InitTcpServer(PORT);
+    if (g_server_fd == -1)
     {
         log_error("Start TCP Server Failed.");
         return 1;
@@ -74,7 +105,7 @@ int main(int argc, char *argv[])
     socklen_t clientLen = sizeof(clientAddress);
     char buffer[BUF_SIZE];
     bool reinitIPC = true;
-    ipc_client_t ipcClient = {.fd = -1};
+    ipcClient.fd = -1;
     if (InitIPC(&ipcClient) != 0)
     {
         log_error("Init IPC Failed");
@@ -85,6 +116,7 @@ int main(int argc, char *argv[])
     case 0:
         initMutexStatus = -2;
         notice_with_warning(&ipcClient, "已启动IPC", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
+        WriteConfig("1", "2");
         break;
     case 1:
         initMutexStatus = -2;
@@ -94,26 +126,21 @@ int main(int argc, char *argv[])
         break;
     }
     // 主TCP循环
-    while (1)
+    while (g_running)
     {
-        // init IPC
-        int client_fd = accept(sockFD,
-                               (struct sockaddr *)&clientAddress,
-                               &clientLen);
-        if (client_fd < 0)
+        // init TCP
+        int tcpClientFD = accept(g_server_fd,
+                                 (struct sockaddr *)&clientAddress,
+                                 &clientLen);
+        if (tcpClientFD < 0)
         {
             perror("accept");
             continue;
         }
-
         log_info("Client: %s:%d\n",
                  inet_ntoa(clientAddress.sin_addr),
                  ntohs(clientAddress.sin_port));
-
-        // notice_with_warning(&ipcClient,
-        //                     "受到连接",
-        //                     inet_ntoa(clientAddress.sin_addr));
-        while (1)
+        while (g_running)
         {
             int n = 0;
             if (reinitIPC)
@@ -127,7 +154,7 @@ int main(int argc, char *argv[])
                 }
                 reinitIPC = false;
             }
-            n = read(client_fd, buffer, BUF_SIZE - 1);
+            n = read(tcpClientFD, buffer, BUF_SIZE - 1);
             if (n <= 0)
                 break;
 
@@ -140,9 +167,10 @@ int main(int argc, char *argv[])
             }
         }
 
-        close(client_fd);
+        close(tcpClientFD);
         log_info("Client disconnected\n");
     }
+    cleanup();
     return 0;
 }
 
@@ -346,4 +374,105 @@ int CheckMutex()
     }
     closedir(dir);
     return returnCode;
+}
+
+int WriteConfig(const char *old_str, const char *new_str)
+{
+    FILE *fp = fopen(JSON_PATH, "r");
+    if (!fp)
+    {
+        perror("fopen");
+        return -1;
+    }
+
+    // 读取文件
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    rewind(fp);
+
+    char *data = malloc(size + 1);
+    if (data == NULL)
+    {
+        log_error("malloc Failed!");
+        return;
+    }
+    fread(data, 1, size, fp);
+    data[size] = '\0';
+    fclose(fp);
+
+    // 解析 JSON
+    cJSON *root = cJSON_Parse(data);
+    if (!root)
+    {
+        log_error("JSON解析失败\n");
+        free(data);
+        return -1;
+    }
+
+    // 获取 description
+    cJSON *desc = cJSON_GetObjectItem(root, "description");
+    if (!desc || !cJSON_IsString(desc))
+    {
+        log_info("description字段不存在或类型错误\n");
+        cJSON_Delete(root);
+        free(data);
+        return -1;
+    }
+
+    // 修改值
+    cJSON_SetValuestring(desc, "当前网络IPC已启动");
+
+    // 重新生成 JSON 字符串
+    char *new_json = cJSON_Print(root);
+
+    // 写回文件
+    fp = fopen(JSON_PATH, "w");
+    if (!fp)
+    {
+        perror("fopen");
+        cJSON_Delete(root);
+        free(data);
+        free(new_json);
+        return -1;
+    }
+
+    fputs(new_json, fp);
+    fclose(fp);
+
+    // 释放
+    cJSON_Delete(root);
+    free(data);
+    free(new_json);
+
+    log_info("修改完成\n");
+    return 0;
+}
+
+void cleanup()
+{
+    log_info("Cleaning resources...");
+
+    // 关闭 client
+    if (g_client_fd >= 0)
+    {
+        shutdown(g_client_fd, SHUT_RDWR);
+        close(g_client_fd);
+        g_client_fd = -1;
+    }
+
+    // 关闭 server
+    if (g_server_fd >= 0)
+    {
+        close(g_server_fd);
+        g_server_fd = -1;
+    }
+
+    // 销毁 IPC
+    if (ipcClient.fd >= 0)
+    {
+        ipc_client_destroy(&ipcClient);
+        ipcClient.fd = -1;
+    }
+
+    log_info("Cleanup done.");
 }

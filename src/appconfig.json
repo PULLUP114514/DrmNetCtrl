@@ -2,9 +2,9 @@
     "version": 1,
     "name": "DRM TCP Ctrl",
     "uuid": "f2bcb75f-a234-49c6-907e-d50c6afcd15f",
-    "description": "当前IPC",
+    "description": "当前网络IPC尚未启动",
     "executable": {
-        "file": "ipc_client_demo"
+        "file": "IpcController"
     },
     "type": "bg",
     "screens": [

@@ -17,17 +17,16 @@ add_library(my_lib STATIC
   lib/ipc_client.c
   lib/ipc_common.c
   lib/uuid.c
+  lib/cJSON.c
 )
 
 target_include_directories(my_lib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
-
 # 2. 主程序
 add_executable(IpcController
   src/main.c
 )
-
 # 3. 链接库
 target_link_libraries(IpcController
   my_lib

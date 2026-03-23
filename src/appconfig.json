@@ -1,0 +1,15 @@
+{
+    "version": 1,
+    "name": "DRM TCP Ctrl",
+    "uuid": "f2bcb75f-a234-49c6-907e-d50c6afcd15f",
+    "description": "当前IPC",
+    "executable": {
+        "file": "ipc_client_demo"
+    },
+    "type": "bg",
+    "screens": [
+        "360x640",
+        "480x854",
+        "720x1280"
+    ]
+}

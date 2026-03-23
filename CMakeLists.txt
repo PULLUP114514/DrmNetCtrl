@@ -1,3 +1,4 @@
+set(APPLICATION_NAME IpcController)
 cmake_minimum_required(VERSION 3.10)
 project(IpcController)
 
@@ -31,3 +32,6 @@ add_executable(IpcController
 target_link_libraries(IpcController
   my_lib
 )
+set(CMAKE_INSTALL_PREFIX ${CMAKE_SOURCE_DIR}/dist CACHE PATH "Install prefix" FORCE)
+install(TARGETS ${APPLICATION_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX}/${APPLICATION_NAME})
+install(FILES ${CMAKE_CURRENT_LIST_DIR}/appconfig.json DESTINATION ${CMAKE_INSTALL_PREFIX}/${APPLICATION_NAME})

@@ -2,7 +2,7 @@
     "version": 1,
     "name": "DRM TCP Ctrl",
     "uuid": "f2bcb75f-a234-49c6-907e-d50c6afcd15f",
-    "description": "当前网络IPC尚未启动",
+    "description": "使用TCP网络控制DRM APP",
     "executable": {
         "file": "IpcController"
     },

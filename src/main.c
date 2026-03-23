@@ -56,7 +56,6 @@ int SetBrightness(int brightness, ipc_client_t *ipcClient);
 int GetInt(char *data, int offset, uint32_t size);
 int InitIPC(ipc_client_t *ipcClient);
 int CheckMutex();
-int WriteConfig(const char *old_str, const char *new_str);
 void cleanup();
 
 ipc_client_t ipcClient = {.fd = -1};
@@ -116,7 +115,6 @@ int main(int argc, char *argv[])
     case 0:
         initMutexStatus = -2;
         notice_with_warning(&ipcClient, "已启动IPC", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
-        WriteConfig("1", "2");
         break;
     case 1:
         initMutexStatus = -2;
@@ -374,78 +372,6 @@ int CheckMutex()
     }
     closedir(dir);
     return returnCode;
-}
-
-int WriteConfig(const char *old_str, const char *new_str)
-{
-    FILE *fp = fopen(JSON_PATH, "r");
-    if (!fp)
-    {
-        perror("fopen");
-        return -1;
-    }
-
-    // 读取文件
-    fseek(fp, 0, SEEK_END);
-    long size = ftell(fp);
-    rewind(fp);
-
-    char *data = malloc(size + 1);
-    if (data == NULL)
-    {
-        log_error("malloc Failed!");
-        return;
-    }
-    fread(data, 1, size, fp);
-    data[size] = '\0';
-    fclose(fp);
-
-    // 解析 JSON
-    cJSON *root = cJSON_Parse(data);
-    if (!root)
-    {
-        log_error("JSON解析失败\n");
-        free(data);
-        return -1;
-    }
-
-    // 获取 description
-    cJSON *desc = cJSON_GetObjectItem(root, "description");
-    if (!desc || !cJSON_IsString(desc))
-    {
-        log_info("description字段不存在或类型错误\n");
-        cJSON_Delete(root);
-        free(data);
-        return -1;
-    }
-
-    // 修改值
-    cJSON_SetValuestring(desc, "当前网络IPC已启动");
-
-    // 重新生成 JSON 字符串
-    char *new_json = cJSON_Print(root);
-
-    // 写回文件
-    fp = fopen(JSON_PATH, "w");
-    if (!fp)
-    {
-        perror("fopen");
-        cJSON_Delete(root);
-        free(data);
-        free(new_json);
-        return -1;
-    }
-
-    fputs(new_json, fp);
-    fclose(fp);
-
-    // 释放
-    cJSON_Delete(root);
-    free(data);
-    free(new_json);
-
-    log_info("修改完成\n");
-    return 0;
 }
 
 void cleanup()

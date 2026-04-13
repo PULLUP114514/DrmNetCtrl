@@ -1,23 +1,35 @@
 /*
- *  此处用于连接Drm_neo_app 与 上位机
+ *  此处用于连接 Drm_neo_app 与 ESP32
  *
  *
- * 包定义 (不超过BUF_SIZE) ：
- *   +------------------+-------------------+--------------------+
- *   |  Operation Code  |  Operation size   |   Operation Data   |
- *   |      uint8       |      uint 16      |    unsigned char   |
- *   +------------------+-------------------+--------------------+
+ *   串口数据帧格式：
+ *   +--------------+--------------+------------------------------------------------------------------------------+-------------+-------------+--------------+--------------+
+ *   |    HEAD 0    |    HEAD 1    |                                  (BODY)                                      |    CRC 0    |    CRC 1    |    TAIL 0    |    TAIL 1    |
+ *   |     0xAA     |     0x55     |                                  (BODY)                                      |     CRC     |     CRC     |     0x0D     |     0x07     |
+ *   +--------------+--------------+------------------------------------------------------------------------------+-------------+-------------+--------------+--------------+
+ *                                 +------------------+------------------+-------------------+--------------------+
+ *                                 |    Package ID    |  Operation Code  |  Operation size   |   Operation Data   |
+ *                                 |      uint 32     |      uint 8      |      uint 16      |    unsigned char   |
+ *                                 +------------------+------------------+-------------------+--------------------+
+ *                                       Reserved                                  |             512 Bytes (Max)
+ *                                 ^                                               |                    ^         ^
+ *                                 |                                               +--------------------+         |
+ *                                 +-------------------------------CRC Protected----------------------------------+
  *  Operation Code 见枚举
  */
 
-// 定义一个枚举类型
+// 此枚举在esp-now和UART中通用
 typedef enum
 {
-    CONTOL_BRIGHTNESS = 1, // Operation Data 为一个int 代表目标屏幕亮度
-    CONTOL_EXIT,           // 退出Drm_App
+    CONTOL_BRIGHTNESS = 128, // Operation Data 为一个int 代表目标屏幕亮度
+    CONTOL_EXIT,             // 退出Drm_App
 
 } OPERATION_CODE_ENUM;
 
+
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -35,6 +47,18 @@ typedef enum
 #include <dirent.h>
 #include <ctype.h>
 #include <cJSON.h>
+#include <termios.h>
+#include <stdint.h>
+
+#pragma pack(push, 1) // 紧凑 1字节对齐
+typedef struct
+{
+    uint32_t packageID;
+    uint8_t OperationCode;
+    uint16_t OperationSize;
+    uint8_t OperationData[512];
+} BodyDef_t;
+#pragma pack(pop)  
 
 #define JSON_PATH "./appconfig.json"
 #define PATH_MAX 4096
@@ -57,7 +81,7 @@ int GetInt(char *data, int offset, uint32_t size);
 int InitIPC(ipc_client_t *ipcClient);
 int CheckMutex();
 void cleanup();
-
+int InitSerial(int *fd, const char *dev, int baudrate);
 ipc_client_t ipcClient = {.fd = -1};
 volatile sig_atomic_t g_running = 1;
 int g_server_fd = -1;
@@ -89,32 +113,50 @@ int main(int argc, char *argv[])
     signal(SIGINT, handle_sig);  // Ctrl+C
     signal(SIGTERM, handle_sig); // kill
 
-    // TODO：Progress Mutex
     int initMutexStatus = CheckMutex();
-    // init TCP Server
-    g_server_fd = InitTcpServer(PORT);
-    if (g_server_fd == -1)
-    {
-        log_error("Start TCP Server Failed.");
-        return 1;
-    }
-    log_info("Server listening on %d...\n", PORT);
 
-    struct sockaddr_in clientAddress;
-    socklen_t clientLen = sizeof(clientAddress);
-    char buffer[BUF_SIZE];
+    // 启动IPC
     bool reinitIPC = true;
-    ipcClient.fd = -1;
     if (InitIPC(&ipcClient) != 0)
     {
         log_error("Init IPC Failed");
     }
+
+    // 启动UART
+    int uartFd = 0;
+    if (InitSerial(&uartFd, "/dev/ttyS1", 115200) != 0)
+    {
+        log_error("open UART failed");
+        notice_with_warning(&ipcClient, "启动uart1失败", "请检查是否有其他应用程式占用 \n或是否在srgn_config中启动uart1");
+        return -1;
+    }
+
+    // 脱离控制
+    pid_t parentPid = getpid();
+    log_info("Parent PID = %d\n", parentPid);
+    fork();
+    pid_t childrenPid = getpid();
+    log_info("Children PID = %d\n", childrenPid);
+    if (childrenPid == parentPid)
+    {
+        log_info("SELF KILLED! PID = %d\n", childrenPid);
+        return 0;
+    }
+
+    // 后台低优先级
+    if (setpriority(PRIO_PROCESS, 0, 10) == -1)
+    {
+        log_error("setpriority Failed");
+    }
+    int prio = getpriority(PRIO_PROCESS, 0);
+    log_info("Current nice: %d\n", prio);
+
     // 使用-2 不显示消息 防止多次初始化IPC多次提示
     switch (initMutexStatus)
     {
     case 0:
         initMutexStatus = -2;
-        notice_with_warning(&ipcClient, "已启动IPC", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
+        notice_with_warning(&ipcClient, "已启动IPC和后台保活", "不建议在IPC正常工作时再次启动\n仅建议在无应答时再次运行以重启");
         break;
     case 1:
         initMutexStatus = -2;
@@ -123,24 +165,15 @@ int main(int argc, char *argv[])
     default:
         break;
     }
-    // 主TCP循环
+
+    // 主UART循环
     while (g_running)
     {
-        // init TCP
-        int tcpClientFD = accept(g_server_fd,
-                                 (struct sockaddr *)&clientAddress,
-                                 &clientLen);
-        if (tcpClientFD < 0)
+        char buf[128];
+        int n = read(uartFd, buf, sizeof(buf));
+
+        if (n > 0)
         {
-            perror("accept");
-            continue;
-        }
-        log_info("Client: %s:%d\n",
-                 inet_ntoa(clientAddress.sin_addr),
-                 ntohs(clientAddress.sin_port));
-        while (g_running)
-        {
-            int n = 0;
             if (reinitIPC)
             {
                 ipcClient.fd = -1;
@@ -152,23 +185,101 @@ int main(int argc, char *argv[])
                 }
                 reinitIPC = false;
             }
-            n = read(tcpClientFD, buffer, BUF_SIZE - 1);
-            if (n <= 0)
-                break;
-
-            buffer[n] = '\0';
-            int success = MessageProcesser(buffer, &ipcClient);
+            int success = MessageProcesser(buf, &ipcClient);
             if (success != 0)
             {
                 reinitIPC = true;
                 continue;
             }
         }
-
-        close(tcpClientFD);
-        log_info("Client disconnected\n");
+        else if (n == 0)
+        {
+            // timeout
+            continue;
+        }
+        else
+        {
+            perror("read");
+            break;
+        }
     }
     cleanup();
+    return 0;
+}
+
+int InitSerial(int *fd, const char *dev, int baudrate)
+{
+    if (!fd || !dev)
+        return -1;
+
+    // 打开串口（阻塞）
+    int tmpfd = open(dev, O_RDWR | O_NOCTTY);
+    if (tmpfd < 0)
+    {
+        perror("open");
+        return -1;
+    }
+
+    struct termios opt;
+    if (tcgetattr(tmpfd, &opt) != 0)
+    {
+        perror("tcgetattr");
+        close(tmpfd);
+        return -1;
+    }
+
+    // 设置波特率
+    speed_t speed;
+    switch (baudrate)
+    {
+    case 9600:
+        speed = B9600;
+        break;
+    case 19200:
+        speed = B19200;
+        break;
+    case 38400:
+        speed = B38400;
+        break;
+    case 57600:
+        speed = B57600;
+        break;
+    case 115200:
+        speed = B115200;
+        break;
+    default:
+        fprintf(stderr, "unsupported baudrate\n");
+        close(tmpfd);
+        return -1;
+    }
+
+    cfsetispeed(&opt, speed);
+    cfsetospeed(&opt, speed);
+
+    // 8N1
+    opt.c_cflag |= (CLOCAL | CREAD);
+    opt.c_cflag &= ~CSIZE;
+    opt.c_cflag |= CS8;
+    opt.c_cflag &= ~PARENB;
+    opt.c_cflag &= ~CSTOPB;
+
+    // 原始模式
+    opt.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+    opt.c_iflag &= ~(IXON | IXOFF | IXANY);
+    opt.c_oflag &= ~OPOST;
+
+    // 关键：1秒超时
+    opt.c_cc[VMIN] = 0;   // 不要求最少字节
+    opt.c_cc[VTIME] = 10; // 1 秒（单位 0.1s）
+
+    if (tcsetattr(tmpfd, TCSANOW, &opt) != 0)
+    {
+        perror("tcsetattr");
+        close(tmpfd);
+        return -1;
+    }
+
+    *fd = tmpfd;
     return 0;
 }
 
@@ -181,52 +292,6 @@ int InitIPC(ipc_client_t *ipcClient)
         return 1;
     }
     return 0;
-}
-
-int InitTcpServer(int port)
-{
-    // 错误缓冲区
-    char errbuf[128];
-
-    int server_fd;
-    struct sockaddr_in addr;
-
-    // 1. 创建 socket
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0)
-    {
-        snprintf(errbuf, sizeof(errbuf), "socket error: %s", strerror(errno));
-        log_error(errbuf);
-        return -1;
-    }
-
-    // 可选：端口复用（避免重启时报 Address already in use）
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // 2. 配置地址
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-
-    // 3. 绑定
-    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-        perror("bind");
-        close(server_fd);
-        return -1;
-    }
-
-    // 4. 监听
-    if (listen(server_fd, BACKLOG) < 0)
-    {
-        perror("listen");
-        close(server_fd);
-        return -1;
-    }
-
-    return server_fd;
 }
 
 int MessageProcesser(char *message, ipc_client_t *ipcClient)
@@ -251,25 +316,6 @@ int MessageProcesser(char *message, ipc_client_t *ipcClient)
         return -1;
     }
     return 0;
-}
-
-/// @brief 转换为int 失败返回 -114514
-/// @param data
-/// @param offset
-/// @param size
-/// @return
-int GetInt(char *data, int offset, uint32_t size)
-{
-    char *endptr;
-    unsigned char temp[size + 1];
-    memcpy(temp, data + offset, size);
-    int intData = strtol(temp, &endptr, 10);
-    if (errno == ERANGE || endptr == temp || *endptr != '\0')
-    {
-        log_error("NOT A NUMBER! What the hell are you doing?\n");
-        return -114514;
-    }
-    return intData;
 }
 
 int SetBrightness(int brightness, ipc_client_t *ipcClient)
@@ -321,7 +367,7 @@ int CheckMutex()
                 // 去掉换行
                 name[strcspn(name, "\n")] = 0;
 
-                if (strcmp(name, "IpcController") == 0)
+                if (strcmp(name, "UartController") == 0)
                 {
                     char *endptr;
                     long pid = strtol(entry->d_name, &endptr, 10);

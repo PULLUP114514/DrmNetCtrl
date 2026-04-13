@@ -1,10 +1,9 @@
-set(APPLICATION_NAME IpcController)
+set(APPLICATION_NAME UartController)
 cmake_minimum_required(VERSION 3.10)
-project(IpcController)
+project(UartController)
 
 # 1. 先做库
 add_library(my_lib STATIC
-  lib/drm_warpper.c
   lib/log.c
   lib/spsc_queue.c
   lib/RREFont/RREFont.cpp
@@ -24,13 +23,13 @@ target_include_directories(my_lib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
 # 2. 主程序
-add_executable(IpcController
+add_executable(UartController
   src/main.c
 )
 # 3. 链接库
-target_link_libraries(IpcController
+target_link_libraries(UartController
   my_lib
 )
 set(CMAKE_INSTALL_PREFIX ${CMAKE_SOURCE_DIR}/dist CACHE PATH "Install prefix" FORCE)
-install(TARGETS ${APPLICATION_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX}/${APPLICATION_NAME})
-install(FILES ${CMAKE_CURRENT_LIST_DIR}/appconfig.json DESTINATION ${CMAKE_INSTALL_PREFIX}/${APPLICATION_NAME})
+#install(TARGETS ${APPLICATION_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX}/${APPLICATION_NAME})
+#install(FILES ${CMAKE_CURRENT_LIST_DIR}/appconfig.json DESTINATION ${CMAKE_INSTALL_PREFIX}/${APPLICATION_NAME})
